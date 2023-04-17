@@ -1,15 +1,8 @@
+import compareVersions from "../compareVersions";
 import getToken from "./getToken";
 
-/**
- * @helper
- * @async
- * @description Fetches a resource from the MongoDB database.
- * @param {string} id The id of the resource to be fetched.
- * @returns {json} The resource in JSON format.
-*/
-export default async function getResourceMongoDB(id) {
-    const token = await getToken();
-    const res = await fetch(`${process.env.MONGODB_URI}/action/findOne`, {
+async function getResourceByID(token, url, dataSource, database, collection, id, version = null) {
+    const res = await fetch(`${url}/action/find`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -19,16 +12,25 @@ export default async function getResourceMongoDB(id) {
             "Authorization": "Bearer " + token,
         },
         body: JSON.stringify({
-            "dataSource": "gem5-vision",
-            "database": "gem5-vision",
-            "collection": process.env.COLLECTION,
-            "filter": {
+            "dataSource": dataSource,
+            "database": database,
+            "collection": collection,
+            "filter": version ? {
+                "id": id,
+                "resource_version": version
+            } : {
                 "id": id
             }
         })
     }).catch(err => console.log(err));
-    const resource = await res.json();
-    const dependendWorkloads = await fetch(`${process.env.MONGODB_URI}/action/aggregate`, {
+    let resource = await res.json();
+    if (resource['documents'] === null || resource['documents'].length === 0) {
+        return { error: 'Resource not found' }
+    }
+
+    resource = resource['documents'].sort((a, b) => -compareVersions(a.resource_version, b.resource_version))[0];
+
+    const dependendWorkloads = await fetch(`${url}/action/aggregate`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -36,9 +38,9 @@ export default async function getResourceMongoDB(id) {
             'Authorization': 'Bearer ' + token,
         },
         body: JSON.stringify({
-            "dataSource": "gem5-vision",
-            "database": "gem5-vision",
-            "collection": "resources",
+            "dataSource": dataSource,
+            "database": database,
+            "collection": collection,
             "pipeline": [
                 {
                     "$addFields": {
@@ -58,16 +60,28 @@ export default async function getResourceMongoDB(id) {
                 {
                     "$group": {
                         "_id": "$id",
-
                     }
                 }
             ]
         })
     }).catch(err => console.log(err));
-    const workloads = await dependendWorkloads.json();
-    if (resource['document'] === null) {
-        return { error: 'Resource not found' }
-    }
-    resource['document'].workloads = Object.values(workloads['documents']).map(workload => workload['_id']);
-    return resource['document']
+    let workloads = await dependendWorkloads.json();
+    resource.workloads = Object.values(workloads['documents']).map(workload => workload['_id']);
+
+    return resource
+}
+
+/**
+ * @helper
+ * @async
+ * @description Fetches a resource from the MongoDB database.
+ * @param {string} id The id of the resource to be fetched.
+ * @returns {json} The resource in JSON format.
+*/
+export default async function getResourceMongoDB(id, database = null, version = null) {
+    const token = await getToken(database);
+    let privateResources = process.env.PRIVATE_RESOURCES[database];
+    const resource = await getResourceByID(token, privateResources.url, privateResources.dataSource, privateResources.database, privateResources.collection, id, version);
+    resource['database'] = database;
+    return resource;
 }

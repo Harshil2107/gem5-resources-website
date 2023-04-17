@@ -8,6 +8,7 @@ import mips from "/public/mips.png";
 import power from "/public/power.png";
 import { Badge } from "react-bootstrap";
 import invalid from "/public/null.svg";
+import { useEffect, useState } from "react";
 /**
  * @component
  * @description A component that renders a search result which includes 
@@ -37,8 +38,11 @@ export default function SearchResult({ resource }) {
 
     return (
         <div className="search-result">
-            <Link href={'/resources/' + resource.id} style={{ textDecoration: 'none', color: 'inherit' }}>
-                <div className="search-result__title">
+            <Link href={('/resources/' + resource.id) + (resource.database ? "?database=" + resource.database : "")} style={{ textDecoration: 'none', color: 'inherit' }}>
+                <div className="search-result__title d-flex flex-row gap-2 align-items-center">
+                    <h4 className="main-text-title-bold text-muted">
+                        {resource.database ? `${resource.database} /` : 'gem5-resources /'}
+                    </h4>
                     <h4 className="main-text-title-bold">{resource.id}</h4>
                 </div>
                 <div className="search-result__description">
@@ -65,11 +69,7 @@ export default function SearchResult({ resource }) {
                         <h6 style={{ lineHeight: 'inherit', margin: '0' }}>
                             v
                         </h6>
-
-                        {
-                            resource.versions.length === 0 ? "None" :
-                                (resource.versions.length > 1 ? resource.versions[1].version : resource.versions[0].version)
-                        }
+                        {resource.resource_version}
                     </div>
                     <div className='d-flex flex-row gap-1'>
                         {

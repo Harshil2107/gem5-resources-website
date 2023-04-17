@@ -12,36 +12,114 @@ function getSort(sort) {
       return { id: 1 };
     case "id_desc":
       return { id: -1 };
-    case "default":
-      return {
-        _id: -1,
-      };
     default:
       return {
-        score: { $meta: "textScore" },
+        score: -1,
       };
   }
 }
-
-/**
- * @helper
- * @async
- * @description Fetches the resources based on the query object from the MongoDB database.
- * @param {json} queryObject The query object.
- * @param {json} filters The filters object.
- * @returns {JSX.Element} The JSX element to be rendered.
- */
-export default async function getResourcesMongoDB(queryObject, currentPage, pageSize) {
-  let resources = [];
-  const access_token = await getToken();
-  if (queryObject.query.trim() === "") {
-    if (queryObject.sort === "relevance") {
-      queryObject.sort = "default";
-    }
-  }
-  let pipeline = [];
+function getLatestVersionPipeline() {
+  let pipeline = [
+    {
+      $addFields: {
+        resource_version_parts: {
+          $map: {
+            input: {
+              $split: ["$resource_version", "."],
+            },
+            in: { $toInt: "$$this" },
+          },
+        },
+      },
+    },
+    {
+      $sort: {
+        id: 1,
+        "resource_version_parts.0": -1,
+        "resource_version_parts.1": -1,
+        "resource_version_parts.2": -1,
+        "resource_version_parts.3": -1,
+      },
+    },
+    {
+      $group: {
+        _id: "$id",
+        latest_version: {
+          $first: "$resource_version",
+        },
+        document: { $first: "$$ROOT" },
+      },
+    },
+    {
+      $replaceRoot: {
+        newRoot: {
+          $mergeObjects: [
+            "$document",
+            {
+              id: "$_id",
+              latest_version: "$latest_version",
+            },
+          ],
+        },
+      },
+    },
+  ]
+  return pipeline;
+}
+function getSearchPipeline(queryObject) {
+  let pipeline = [
+    {
+      $search: {
+        compound: {
+          should: [
+            {
+              text: {
+                path: "id",
+                query: queryObject.query,
+                score: {
+                  boost: {
+                    value: 10,
+                  },
+                },
+              },
+            },
+          ],
+          must: [
+            {
+              text: {
+                query: queryObject.query,
+                path: [
+                  "id",
+                  "desciption",
+                  "category",
+                  "architecture",
+                  "tags",
+                ],
+                fuzzy: {
+                  maxEdits: 2,
+                  maxExpansions: 100,
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+    {
+      $addFields: {
+        score: {
+          $meta: "searchScore",
+        },
+      },
+    },
+  ];
+  return pipeline;
+}
+function getFilterPipeline(queryObject) {
+  let pipeline = []
+  // adding filter by gem5 version if the user has selected one
   if (queryObject.tags) {
-    pipeline = pipeline.concat([
+    pipeline.push(...[
       {
         $addFields: {
           tag: "$tags",
@@ -72,16 +150,39 @@ export default async function getResourcesMongoDB(queryObject, currentPage, page
       },
     ]);
   }
-  pipeline = pipeline.concat([
-    {
-      $addFields: {
-        a: "$versions.version",
-        ver_latest: {
-          $last: "$versions.version",
+  if (queryObject.gem5_versions) {
+    pipeline.push(...[
+      {
+        $addFields: {
+          version: "$gem5_versions",
         },
       },
-    },
-  ]);
+      {
+        $unwind: "$version",
+      },
+      {
+        $match: {
+          version: {
+            $in: queryObject.gem5_versions || [],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$_id",
+          doc: {
+            $first: "$$ROOT",
+          },
+        },
+      },
+      {
+        $replaceRoot: {
+          newRoot: "$doc",
+        },
+      },
+    ]);
+  }
+  // adding the other fileters such as category and architecture to the serch pipeline
   let match = [];
   if (queryObject.category) {
     match.push({ category: { $in: queryObject.category || [] } });
@@ -89,9 +190,7 @@ export default async function getResourcesMongoDB(queryObject, currentPage, page
   if (queryObject.architecture) {
     match.push({ architecture: { $in: queryObject.architecture || [] } });
   }
-  if (queryObject.versions) {
-    match.push({ "versions.version": { $in: queryObject.versions || [] } });
-  }
+  // adding the match to the pipeline if there are some filters selected
   if (match.length > 0) {
     pipeline.push({
       $match: {
@@ -99,13 +198,24 @@ export default async function getResourcesMongoDB(queryObject, currentPage, page
       },
     });
   }
-  pipeline = pipeline.concat([
+  return pipeline;
+}
+function getSortPipeline(queryObject) {
+  let pipeline = [
+    {
+      $addFields: {
+        ver_latest: {
+          $max: "$gem5_versions",
+        },
+      },
+    },
     {
       $sort: getSort(queryObject.sort),
-    },
-    {
-      $unset: ["a", "ver_latest"],
-    },
+    }];
+  return pipeline;
+}
+function getPagePipeline(currentPage, pageSize) {
+  let pipeline = [
     {
       $setWindowFields: { output: { totalCount: { $count: {} } } },
     },
@@ -115,60 +225,58 @@ export default async function getResourcesMongoDB(queryObject, currentPage, page
     {
       $limit: pageSize,
     },
-  ]);
-
-  if (queryObject.query.trim() !== "") {
-    // find score greater than 0.5
-    /* pipeline.unshift({
-      $match: {
-        score: {
-          $gt: 0.5,
-        },
-      },
-    }); */
-    pipeline.unshift({
-      "$addFields": {
-        "score": {
-          "$meta": "searchScore"
-        }
-      }
-    });
-    pipeline.unshift({
-      $search: {
-        index: "default",
-        text: {
-          query: queryObject.query,
-          path: {
-            wildcard: "*",
-          },
-          fuzzy: {
-            maxEdits: 2,
-            maxExpansions: 100,
-          },
-        },
-      },
-    });
-  }
-  const res = await fetch(
-    `${process.env.MONGODB_URI}/action/aggregate`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // 'api-key': 'pKkhRJGJaQ3NdJyDt69u4GPGQTDUIhHlx4a3lrKUNx2hxuc8uba8NrP3IVRvlzlo',
-        "Access-Control-Request-Headers": "*",
-        // 'origin': 'https://gem5vision.github.io',
-        Authorization: "Bearer " + access_token,
-      },
-      // also apply filters on
-      body: JSON.stringify({
-        dataSource: "gem5-vision",
-        database: "gem5-vision",
-        collection: process.env.COLLECTION,
-        pipeline: pipeline,
-      }),
+  ];
+  return pipeline;
+}
+function getPipeline(queryObject, currentPage, pageSize) {
+  let pipeline = [];
+  if (queryObject.query.trim() === "") {
+    if (queryObject.sort === "relevance") {
+      queryObject.sort = "default";
     }
-  ).catch((err) => console.log(err));
+  }
+  // adding search query if something is entered
+  if (queryObject.query.trim() !== "") {
+    pipeline.push(...getSearchPipeline(queryObject));
+  }
+  // getting latest resource version for each resource and removing the rest
+  pipeline.push(...getLatestVersionPipeline());
+  // adding the filters to the pipeline
+  pipeline.push(...getFilterPipeline(queryObject));
+  // adding the sorting to the pipeline
+  pipeline.push(...getSortPipeline(queryObject));
+  // adding the pagination to the pipeline
+  pipeline.push(...getPagePipeline(currentPage, pageSize));
+  return pipeline;
+}
+
+async function getSearchResults(
+  accessToken,
+  url,
+  dataSource,
+  database,
+  collection,
+  queryObject,
+  currentPage,
+  pageSize
+) {
+  let resources = [];
+  const pipeline = getPipeline(queryObject, currentPage, pageSize);
+  const res = await fetch(`${url}/action/aggregate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Request-Headers": "*",
+      Authorization: "Bearer " + accessToken,
+    },
+    // also apply filters on
+    body: JSON.stringify({
+      dataSource: dataSource,
+      database: database,
+      collection: collection,
+      pipeline: pipeline,
+    }),
+  }).catch((err) => console.log(err));
   resources = await res.json();
   return [
     resources["documents"],
@@ -176,4 +284,32 @@ export default async function getResourcesMongoDB(queryObject, currentPage, page
       ? resources["documents"][0].totalCount
       : 0,
   ];
+}
+
+
+/**
+ * @helper
+ * @async
+ * @description Fetches the resources based on the query object from the MongoDB database.
+ * @param {json} queryObject The query object.
+ * @param {json} filters The filters object.
+ * @returns {JSX.Element} The JSX element to be rendered.
+ */
+export default async function getResourcesMongoDB(queryObject, currentPage, pageSize, database) {
+  let privateResources = process.env.PRIVATE_RESOURCES
+  let privateResource = privateResources[database];
+  let privateAccessToken = await getToken(database);
+  let privateResourceResults = await getSearchResults(privateAccessToken,
+    privateResource.url,
+    privateResource.dataSource,
+    privateResource.database,
+    privateResource.collection,
+    queryObject,
+    currentPage,
+    pageSize);
+  privateResourceResults[0].forEach((resource) => {
+    resource.database = database;
+  });
+
+  return privateResourceResults;
 }
