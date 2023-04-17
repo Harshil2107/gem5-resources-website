@@ -25,11 +25,8 @@ jobs:
           npm i
           npm run build
           npm run export
-        env:
-          IS_MONGODB_ENABLED: ${{secrets.IS_MONGODB_ENABLED}}
-          MONGODB_API_KEY: ${{secrets.MONGODB_API_KEY}}
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
         with:
-          deploy_key: ${{ secrets.DEPLOY_TOKEN }}
+          deploy_key: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./out
